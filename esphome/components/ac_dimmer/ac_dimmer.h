@@ -39,11 +39,30 @@ struct AcDimmerDataStore {
 #ifdef USE_ESP32
   static void s_timer_intr();
 #endif
+  // Debug event record for each half-cycle
+  struct DebugEvent {
+    uint32_t zc_timestamp;
+    uint32_t zc_period_us;
+    uint32_t requested_on_us;
+    uint32_t actual_on_us;
+    uint32_t requested_off_us;
+    uint32_t actual_off_us;
+  };
+
+  static constexpr size_t DEBUG_BUF_SIZE = 256;
+  static constexpr uint8_t DEBUG_BUF_MASK = 0xFF;  // DEBUG_BUF_SIZE - 1
+  // Ring buffer of debug events (written from ISR, read from loop())
+  DebugEvent debug_buffer[DEBUG_BUF_SIZE];
+  volatile uint8_t dbg_write_idx{0};
+  volatile uint8_t dbg_read_idx{0};
+  // Index of the currently active record (set at ZC, updated by timer ISR)
+  volatile uint8_t dbg_active_idx{0};
 };
 
 class AcDimmer final : public output::FloatOutput, public Component {
  public:
   void setup() override;
+  void loop() override;
 
   void dump_config() override;
   void set_gate_pin(InternalGPIOPin *gate_pin) { gate_pin_ = gate_pin; }
@@ -61,6 +80,8 @@ class AcDimmer final : public output::FloatOutput, public Component {
   AcDimmerDataStore store_;
   bool init_with_half_cycle_;
   DimMethod method_;
+  // For periodic logging in loop()
+  uint32_t last_log_time_{0};
 };
 
 }  // namespace esphome::ac_dimmer

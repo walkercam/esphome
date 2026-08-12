@@ -50,13 +50,24 @@ uint32_t IRAM_ATTR HOT AcDimmerDataStore::timer_intr(uint32_t now) {
   if (this->enable_time_us != 0 && time_since_zc >= this->enable_time_us) {
     this->enable_time_us = 0;
     this->gate_pin.digital_write(true);
+    // record actual on time for the active debug record
+    {
+      uint8_t aidx = this->dbg_active_idx;
+      this->debug_buffer[aidx].actual_on_us = time_since_zc;
+    }
     // Prevent too short pulses
     this->disable_time_us = std::max(this->disable_time_us, time_since_zc + GATE_ENABLE_TIME);
   }
   if (this->disable_time_us != 0 && time_since_zc >= this->disable_time_us) {
     this->disable_time_us = 0;
     this->gate_pin.digital_write(false);
+    // record actual off time for the active debug record
+    {
+      uint8_t aidx = this->dbg_active_idx;
+      this->debug_buffer[aidx].actual_off_us = time_since_zc;
+    }
   }
+
 
   if (time_since_zc < this->enable_time_us) {
     // Next event is enable, return time until that event
@@ -139,6 +150,19 @@ void IRAM_ATTR HOT AcDimmerDataStore::gpio_intr() {
         this->disable_time_us = this->cycle_time_us;
       }
     }
+  }
+
+  // Create debug record for this half-cycle after requested times are calculated.
+  {
+    uint8_t idx = this->dbg_write_idx;
+    this->debug_buffer[idx].zc_timestamp = this->crossed_zero_at;
+    this->debug_buffer[idx].zc_period_us = this->cycle_time_us;
+    this->debug_buffer[idx].requested_on_us = this->enable_time_us;
+    this->debug_buffer[idx].actual_on_us = 0;
+    this->debug_buffer[idx].requested_off_us = this->disable_time_us;
+    this->debug_buffer[idx].actual_off_us = 0;
+    this->dbg_active_idx = idx;
+    this->dbg_write_idx = (uint8_t)((idx + 1) & DEBUG_BUF_MASK);
   }
 }
 
@@ -247,6 +271,23 @@ void AcDimmer::dump_config() {
   }
   LOG_FLOAT_OUTPUT(this);
   ESP_LOGV(TAG, "  Estimated Frequency: %.3fHz", 1e6f / this->store_.cycle_time_us / 2);
+}
+
+void AcDimmer::loop() {
+  uint32_t now = millis();
+  if (now - this->last_log_time_ < 1000)
+    return;
+  this->last_log_time_ = now;
+
+  // Drain completed debug records and log CSV lines
+  while (this->store_.dbg_read_idx != this->store_.dbg_write_idx) {
+    uint8_t idx = this->store_.dbg_read_idx;
+    // Copy to local to avoid races while logging
+    AcDimmerDataStore::DebugEvent ev = this->store_.debug_buffer[idx];
+    ESP_LOGD(TAG, "ACDIM_DEBUG,%u,%u,%u,%u,%u,%u", ev.zc_timestamp, ev.zc_period_us,
+             ev.requested_on_us, ev.actual_on_us, ev.requested_off_us, ev.actual_off_us);
+    this->store_.dbg_read_idx = (uint8_t)((idx + 1) & AcDimmerDataStore::DEBUG_BUF_MASK);
+  }
 }
 
 }  // namespace esphome::ac_dimmer
