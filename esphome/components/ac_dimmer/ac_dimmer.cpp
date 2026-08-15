@@ -4,13 +4,7 @@
 #include <cmath>
 #include <numbers>
 
-#ifdef USE_ESP8266
-#include <core_esp8266_waveform.h>
-#endif
-
-#ifdef USE_ESP32
 #include "hw_timer_esp_idf.h"
-#endif
 
 namespace esphome::ac_dimmer {
 
@@ -27,12 +21,10 @@ static AcDimmerDataStore *all_dimmers[32];  // NOLINT(cppcoreguidelines-avoid-no
 /// See also: https://github.com/esphome/issues/issues/1632
 static constexpr uint32_t GATE_ENABLE_TIME = 50;
 
-#ifdef USE_ESP32
 /// Timer frequency in Hz (1 MHz = 1µs resolution)
 static constexpr uint32_t TIMER_FREQUENCY_HZ = 1000000;
 /// Timer interrupt interval in microseconds
-static constexpr uint64_t TIMER_INTERVAL_US = 50;
-#endif
+static constexpr uint64_t TIMER_INTERVAL_US = 10;     // was 50us. changed to see if we can easily improve the timing performance without structural changes.
 
 /// Function called from timer interrupt
 /// Input is current time in microseconds (micros())
@@ -51,21 +43,18 @@ uint32_t IRAM_ATTR HOT AcDimmerDataStore::timer_intr(uint32_t now) {
     this->enable_time_us = 0;
     this->gate_pin.digital_write(true);
     // record actual on time for the active debug record
-    {
-      uint8_t aidx = this->dbg_active_idx;
-      this->debug_buffer[aidx].actual_on_us = time_since_zc;
-    }
+    uint8_t aidx = this->dbg_active_idx;
+    this->debug_buffer[aidx].actual_on_us = time_since_zc;
     // Prevent too short pulses
     this->disable_time_us = std::max(this->disable_time_us, time_since_zc + GATE_ENABLE_TIME);
   }
+
   if (this->disable_time_us != 0 && time_since_zc >= this->disable_time_us) {
+    // record actual off time for the active debug record
+    uint8_t aidx = this->dbg_active_idx;
+    this->debug_buffer[aidx].actual_off_us = time_since_zc - this->disable_time_us;
     this->disable_time_us = 0;
     this->gate_pin.digital_write(false);
-    // record actual off time for the active debug record
-    {
-      uint8_t aidx = this->dbg_active_idx;
-      this->debug_buffer[aidx].actual_off_us = time_since_zc;
-    }
   }
 
 
@@ -105,19 +94,17 @@ uint32_t IRAM_ATTR HOT timer_interrupt() {
 
 /// GPIO interrupt routine, called when ZC pin triggers
 void IRAM_ATTR HOT AcDimmerDataStore::gpio_intr() {
+  
   uint32_t prev_crossed = this->crossed_zero_at;
+  uint32_t now = micros();
 
-  // 50Hz mains frequency should give a half cycle of 10ms a 60Hz will give 8.33ms
-  // in any case the cycle last at least 5ms
-  this->crossed_zero_at = micros();
-  uint32_t cycle_time = this->crossed_zero_at - prev_crossed;
-  if (cycle_time > 5000) {
-    this->cycle_time_us = cycle_time;
-  } else {
-    // Otherwise this is noise and this is 2nd (or 3rd...) fall in the same pulse
-    // Consider this is the right fall edge and accumulate the cycle time instead
-    this->cycle_time_us += cycle_time;
+  if ((now - prev_crossed) < 18000) {
+    return;
   }
+
+  this->crossed_zero_at = now;
+  uint32_t cycle_time = this->crossed_zero_at - prev_crossed;
+  this->cycle_time_us = cycle_time;
 
   if (this->value == 65535) {
     // fully on, enable output immediately
@@ -133,7 +120,9 @@ void IRAM_ATTR HOT AcDimmerDataStore::gpio_intr() {
   } else {
     auto min_us = this->cycle_time_us * this->min_power / 1000;
     if (this->method == DIM_METHOD_TRAILING) {
-      this->enable_time_us = 1;  // cannot be 0
+      //this->enable_time_us = 1;  // cannot be 0
+      this->enable_time_us = 40000;                                                                                         // make this really long so we never trigger the turn on code in the timer interrupt.  We will turn on the gate pin here instead of in the timer interrupt.  
+      this->gate_pin.digital_write(true);                                                                                   // turn on the gate pin immediately after the zero cross so that we can get a good dimming range at low power levels.
       // calculate time until disable in µs with integer arithmetic and take into account min_power
       this->disable_time_us = std::max((uint32_t) 10, this->value * (this->cycle_time_us - min_us) / 65535 + min_us);
     } else {
@@ -158,7 +147,7 @@ void IRAM_ATTR HOT AcDimmerDataStore::gpio_intr() {
     this->debug_buffer[idx].zc_timestamp = this->crossed_zero_at;
     this->debug_buffer[idx].zc_period_us = this->cycle_time_us;
     this->debug_buffer[idx].requested_on_us = this->enable_time_us;
-    this->debug_buffer[idx].actual_on_us = 0;
+    this->debug_buffer[idx].actual_on_us = micros();                  // grab the actual on time here with micros so we can see if there is a delay between the zc and the actual on time.
     this->debug_buffer[idx].requested_off_us = this->disable_time_us;
     this->debug_buffer[idx].actual_off_us = 0;
     this->dbg_active_idx = idx;
@@ -180,12 +169,9 @@ void IRAM_ATTR HOT AcDimmerDataStore::s_gpio_intr(AcDimmerDataStore *store) {
   }
 }
 
-#ifdef USE_ESP32
-// ESP32 implementation, uses basically the same code but needs to wrap
-// timer_interrupt() function to auto-reschedule
+// wrap timer_interrupt() function to auto-reschedule
 static HWTimer *dimmer_timer = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 void IRAM_ATTR HOT AcDimmerDataStore::s_timer_intr() { timer_interrupt(); }
-#endif
 
 void AcDimmer::setup() {
   // extend all_dimmers array with our dimmer
@@ -217,12 +203,6 @@ void AcDimmer::setup() {
                                             this->zero_cross_interrupt_type_);
   }
 
-#ifdef USE_ESP8266
-  // Uses ESP8266 waveform (soft PWM) class
-  // PWM and AcDimmer can even run at the same time this way
-  setTimer1Callback(&timer_interrupt);
-#endif
-#ifdef USE_ESP32
   if (dimmer_timer == nullptr) {
     dimmer_timer = timer_begin(TIMER_FREQUENCY_HZ);
     if (dimmer_timer == nullptr) {
@@ -236,11 +216,10 @@ void AcDimmer::setup() {
     // Here we just use an interrupt firing every 50 µs.
     timer_alarm(dimmer_timer, TIMER_INTERVAL_US, true, 0);
   }
-#endif
 }
 
 void AcDimmer::write_state(float state) {
-  state = std::acos(1 - (2 * state)) / std::numbers::pi_v<float>;  // RMS power compensation
+  //state = std::acos(1 - (2 * state)) / std::numbers::pi_v<float>;  // RMS power compensation
   auto new_value = static_cast<uint16_t>(roundf(state * 65535));
   if (new_value != 0 && this->store_.value == 0)
     this->store_.init_cycle = this->init_with_half_cycle_;
@@ -284,8 +263,13 @@ void AcDimmer::loop() {
     uint8_t idx = this->store_.dbg_read_idx;
     // Copy to local to avoid races while logging
     AcDimmerDataStore::DebugEvent ev = this->store_.debug_buffer[idx];
-    ESP_LOGD(TAG, "ACDIM_DEBUG,%u,%u,%u,%u,%u,%u", ev.zc_timestamp, ev.zc_period_us,
+    ESP_LOGD(TAG, "ACDIM_DEBUG,%lu,%lu,%lu,%lu,%lu,%lu", ev.zc_timestamp, ev.zc_period_us,
              ev.requested_on_us, ev.actual_on_us, ev.requested_off_us, ev.actual_off_us);
+    #ifdef CONFIG_GPTIMER_CTRL_FUNC_IN_IRAM
+    ESP_LOGD(TAG, "GPTimer control functions are in IRAM");
+    #else
+    ESP_LOGW(TAG, "GPTimer control functions are NOT in IRAM");
+    #endif
     this->store_.dbg_read_idx = (uint8_t)((idx + 1) & AcDimmerDataStore::DEBUG_BUF_MASK);
   }
 }
