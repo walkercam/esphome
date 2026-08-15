@@ -265,11 +265,6 @@ void AcDimmer::loop() {
     AcDimmerDataStore::DebugEvent ev = this->store_.debug_buffer[idx];
     ESP_LOGD(TAG, "ACDIM_DEBUG,%lu,%lu,%lu,%lu,%lu,%lu", ev.zc_timestamp, ev.zc_period_us,
              ev.requested_on_us, ev.actual_on_us, ev.requested_off_us, ev.actual_off_us);
-    #ifdef CONFIG_GPTIMER_CTRL_FUNC_IN_IRAM
-    ESP_LOGD(TAG, "GPTimer control functions are in IRAM");
-    #else
-    ESP_LOGW(TAG, "GPTimer control functions are NOT in IRAM");
-    #endif
     this->store_.dbg_read_idx = (uint8_t)((idx + 1) & AcDimmerDataStore::DEBUG_BUF_MASK);
   }
 }
