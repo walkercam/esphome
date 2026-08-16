@@ -28,13 +28,13 @@ struct AcDimmerDataStore {
   /// Time since last ZC pulse to disable gate pin. 0 means no disable.
   uint32_t disable_time_us;
   /// Set to send the first half ac cycle complete
-  bool init_cycle;
+  uint8_t init_cycle;
   /// Dimmer method
   DimMethod method;
 
   uint32_t timer_intr(uint32_t now);
 
-  void gpio_intr();
+  void gpio_intr(uint8_t edge);
   static void s_gpio_intr(AcDimmerDataStore *store);
 #ifdef USE_ESP32
   static void s_timer_intr();

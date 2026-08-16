@@ -93,12 +93,12 @@ uint32_t IRAM_ATTR HOT timer_interrupt() {
 }
 
 /// GPIO interrupt routine, called when ZC pin triggers
-void IRAM_ATTR HOT AcDimmerDataStore::gpio_intr() {
+void IRAM_ATTR HOT AcDimmerDataStore::gpio_intr(uint8_t edge) {
   
   uint32_t prev_crossed = this->crossed_zero_at;
   uint32_t now = micros();
 
-  if ((now - prev_crossed) < 18000) {
+  if ((now - prev_crossed) < 9000) {
     return;
   }
 
@@ -111,8 +111,8 @@ void IRAM_ATTR HOT AcDimmerDataStore::gpio_intr() {
     this->gate_pin.digital_write(true);
   } else if (this->init_cycle) {
     // send a full cycle
-    this->init_cycle = false;
-    this->enable_time_us = 0;
+    this->init_cycle = this->init_cycle - 1;
+    this->enable_time_us = 1;
     this->disable_time_us = cycle_time_us;
   } else if (this->value == 0) {
     // fully off, disable output immediately
@@ -120,9 +120,13 @@ void IRAM_ATTR HOT AcDimmerDataStore::gpio_intr() {
   } else {
     auto min_us = this->cycle_time_us * this->min_power / 1000;
     if (this->method == DIM_METHOD_TRAILING) {
-      //this->enable_time_us = 1;  // cannot be 0
-      this->enable_time_us = 40000;                                                                                         // make this really long so we never trigger the turn on code in the timer interrupt.  We will turn on the gate pin here instead of in the timer interrupt.  
-      this->gate_pin.digital_write(true);                                                                                   // turn on the gate pin immediately after the zero cross so that we can get a good dimming range at low power levels.
+      if (edge) {
+        this->enable_time_us = 1;  
+      }
+      else {
+        this->enable_time_us = 75;  
+      }
+      //this->gate_pin.digital_write(true);                                                                                   // turn on the gate pin immediately after the zero cross so that we can get a good dimming range at low power levels.
       // calculate time until disable in µs with integer arithmetic and take into account min_power
       this->disable_time_us = std::max((uint32_t) 10, this->value * (this->cycle_time_us - min_us) / 65535 + min_us);
     } else {
@@ -142,17 +146,17 @@ void IRAM_ATTR HOT AcDimmerDataStore::gpio_intr() {
   }
 
   // Create debug record for this half-cycle after requested times are calculated.
-  {
-    uint8_t idx = this->dbg_write_idx;
-    this->debug_buffer[idx].zc_timestamp = this->crossed_zero_at;
-    this->debug_buffer[idx].zc_period_us = this->cycle_time_us;
-    this->debug_buffer[idx].requested_on_us = this->enable_time_us;
-    this->debug_buffer[idx].actual_on_us = micros();                  // grab the actual on time here with micros so we can see if there is a delay between the zc and the actual on time.
-    this->debug_buffer[idx].requested_off_us = this->disable_time_us;
-    this->debug_buffer[idx].actual_off_us = 0;
-    this->dbg_active_idx = idx;
-    this->dbg_write_idx = (uint8_t)((idx + 1) & DEBUG_BUF_MASK);
-  }
+  //{
+  //  uint8_t idx = this->dbg_write_idx;
+  //  this->debug_buffer[idx].zc_timestamp = this->crossed_zero_at;
+  //  this->debug_buffer[idx].zc_period_us = this->cycle_time_us;
+  //  this->debug_buffer[idx].requested_on_us = this->enable_time_us;
+  //  this->debug_buffer[idx].actual_on_us = micros();                  // grab the actual on time here with micros so we can see if there is a delay between the zc and the actual on time.
+  //  this->debug_buffer[idx].requested_off_us = this->disable_time_us;
+  //  this->debug_buffer[idx].actual_off_us = 0;
+  //  this->dbg_active_idx = idx;
+  //  this->dbg_write_idx = (uint8_t)((idx + 1) & DEBUG_BUF_MASK);
+  //}
 }
 
 void IRAM_ATTR HOT AcDimmerDataStore::s_gpio_intr(AcDimmerDataStore *store) {
@@ -160,11 +164,13 @@ void IRAM_ATTR HOT AcDimmerDataStore::s_gpio_intr(AcDimmerDataStore *store) {
   // However, the user expects that multiple dimmers sharing the same ZC pin will work.
   // We solve this in a bit of a hacky way: On each pin interrupt, we check all dimmers
   // if any of them are using the same ZC pin, and also trigger the interrupt for *them*.
+  uint8_t edge = store->zero_cross_pin.digital_read();
+  
   for (auto *dimmer : all_dimmers) {
     if (dimmer == nullptr)
       break;
     if (dimmer->zero_cross_pin_number == store->zero_cross_pin_number) {
-      dimmer->gpio_intr();
+      dimmer->gpio_intr(edge);
     }
   }
 }
@@ -222,7 +228,7 @@ void AcDimmer::write_state(float state) {
   //state = std::acos(1 - (2 * state)) / std::numbers::pi_v<float>;  // RMS power compensation
   auto new_value = static_cast<uint16_t>(roundf(state * 65535));
   if (new_value != 0 && this->store_.value == 0)
-    this->store_.init_cycle = this->init_with_half_cycle_;
+    this->store_.init_cycle = this->init_with_half_cycle_ * 5;  //change the multiplier to change how many half cycles to send at turn on
   this->store_.value = new_value;
 }
 
@@ -259,6 +265,7 @@ void AcDimmer::loop() {
   this->last_log_time_ = now;
 
   // Drain completed debug records and log CSV lines
+  /*
   while (this->store_.dbg_read_idx != this->store_.dbg_write_idx) {
     uint8_t idx = this->store_.dbg_read_idx;
     // Copy to local to avoid races while logging
@@ -267,6 +274,7 @@ void AcDimmer::loop() {
              ev.requested_on_us, ev.actual_on_us, ev.requested_off_us, ev.actual_off_us);
     this->store_.dbg_read_idx = (uint8_t)((idx + 1) & AcDimmerDataStore::DEBUG_BUF_MASK);
   }
+    */
 }
 
 }  // namespace esphome::ac_dimmer
