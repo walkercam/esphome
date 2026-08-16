@@ -12,6 +12,8 @@ static const char *const TAG = "ac_dimmer";
 
 // Global array to store dimmer objects
 static AcDimmerDataStore *all_dimmers[32];  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+// timer callback for the next scheduled event; re-arms for the following one-shot alarm.
+static HWTimer *dimmer_timer = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 /// Time in microseconds the gate should be held high
 /// 10µs should be long enough for most triacs
@@ -44,7 +46,7 @@ uint32_t IRAM_ATTR HOT AcDimmerDataStore::timer_intr(uint32_t now) {
     this->gate_pin.digital_write(true);
     // record actual on time for the active debug record
     uint8_t aidx = this->dbg_active_idx;
-    this->debug_buffer[aidx].actual_on_us = time_since_zc;
+    //this->debug_buffer[aidx].actual_on_us = time_since_zc;
     // Prevent too short pulses
     this->disable_time_us = std::max(this->disable_time_us, time_since_zc + GATE_ENABLE_TIME);
   }
@@ -52,7 +54,7 @@ uint32_t IRAM_ATTR HOT AcDimmerDataStore::timer_intr(uint32_t now) {
   if (this->disable_time_us != 0 && time_since_zc >= this->disable_time_us) {
     // record actual off time for the active debug record
     uint8_t aidx = this->dbg_active_idx;
-    this->debug_buffer[aidx].actual_off_us = time_since_zc - this->disable_time_us;
+    //this->debug_buffer[aidx].actual_off_us = time_since_zc - this->disable_time_us;
     this->disable_time_us = 0;
     this->gate_pin.digital_write(false);
   }
@@ -74,22 +76,44 @@ uint32_t IRAM_ATTR HOT AcDimmerDataStore::timer_intr(uint32_t now) {
   return this->cycle_time_us - time_since_zc;
 }
 
-/// Run timer interrupt code and return in how many µs the next event is expected
-uint32_t IRAM_ATTR HOT timer_interrupt() {
-  // run at least with 1kHz
-  uint32_t min_dt_us = 1000;
+/// Arm the next pending dimmer event in one-shot alarm mode.
+static void IRAM_ATTR HOT schedule_next_timer_alarm() {
+  if (dimmer_timer == nullptr)
+    return;
+
+  uint64_t next_deadline_us = UINT64_MAX;
   uint32_t now = micros();
+
   for (auto *dimmer : all_dimmers) {
     if (dimmer == nullptr) {
-      // no more dimmers
       break;
     }
-    uint32_t res = dimmer->timer_intr(now);
-    if (res != 0 && res < min_dt_us)
-      min_dt_us = res;
+    if (dimmer->crossed_zero_at == 0)
+      continue;
+
+    if (dimmer->enable_time_us != 0) {
+      uint64_t event_time = static_cast<uint64_t>(dimmer->crossed_zero_at) + dimmer->enable_time_us;
+      if (event_time >= (now-5) && event_time < next_deadline_us) {
+        next_deadline_us = event_time;
+      }
+    }
+    if (dimmer->disable_time_us != 0) {
+      uint64_t event_time = static_cast<uint64_t>(dimmer->crossed_zero_at) + dimmer->disable_time_us;
+      if (event_time >= (now-5) && event_time < next_deadline_us) {
+        next_deadline_us = event_time;
+      }
+    }
   }
-  // return time until next timer1 interrupt in µs
-  return min_dt_us;
+
+  if (next_deadline_us == UINT64_MAX)
+    return;
+
+  uint64_t delta = next_deadline_us > now ? (next_deadline_us - now) : 0;
+  // Ensure at least 1us delay to avoid re-triggering immediately
+  if (delta < 1)
+    delta = 1;    //see if 1us minimum gives reliable triggering. we may miss some events
+
+  timer_alarm(dimmer_timer, delta, false, 0);
 }
 
 /// GPIO interrupt routine, called when ZC pin triggers
@@ -109,6 +133,8 @@ void IRAM_ATTR HOT AcDimmerDataStore::gpio_intr(uint8_t edge) {
   if (this->value == 65535) {
     // fully on, enable output immediately
     this->gate_pin.digital_write(true);
+    this->enable_time_us = 0;
+    this->disable_time_us = 0;
   } else if (this->init_cycle) {
     // send a full cycle
     this->init_cycle = this->init_cycle - 1;
@@ -117,20 +143,20 @@ void IRAM_ATTR HOT AcDimmerDataStore::gpio_intr(uint8_t edge) {
   } else if (this->value == 0) {
     // fully off, disable output immediately
     this->gate_pin.digital_write(false);
+    this->enable_time_us = 0;
+    this->disable_time_us = 0;
   } else {
     auto min_us = this->cycle_time_us * this->min_power / 1000;
     if (this->method == DIM_METHOD_TRAILING) {
       if (edge) {
-        this->enable_time_us = 1;  
+        this->enable_time_us = 1;
+      } else {
+        this->enable_time_us = 75;
       }
-      else {
-        this->enable_time_us = 75;  
-      }
-      //this->gate_pin.digital_write(true);                                                                                   // turn on the gate pin immediately after the zero cross so that we can get a good dimming range at low power levels.
-      // calculate time until disable in µs with integer arithmetic and take into account min_power
+      // Calculate time until disable in µs with integer arithmetic and take into account min_power
       this->disable_time_us = std::max((uint32_t) 10, this->value * (this->cycle_time_us - min_us) / 65535 + min_us);
     } else {
-      // calculate time until enable in µs: (1.0-value)*cycle_time, but with integer arithmetic
+      // Calculate time until enable in µs: (1.0-value)*cycle_time, but with integer arithmetic
       // also take into account min_power
       this->enable_time_us = std::max((uint32_t) 1, ((65535 - this->value) * (this->cycle_time_us - min_us)) / 65535);
 
@@ -145,18 +171,20 @@ void IRAM_ATTR HOT AcDimmerDataStore::gpio_intr(uint8_t edge) {
     }
   }
 
+  schedule_next_timer_alarm();
+
   // Create debug record for this half-cycle after requested times are calculated.
-  //{
-  //  uint8_t idx = this->dbg_write_idx;
-  //  this->debug_buffer[idx].zc_timestamp = this->crossed_zero_at;
-  //  this->debug_buffer[idx].zc_period_us = this->cycle_time_us;
-  //  this->debug_buffer[idx].requested_on_us = this->enable_time_us;
-  //  this->debug_buffer[idx].actual_on_us = micros();                  // grab the actual on time here with micros so we can see if there is a delay between the zc and the actual on time.
-  //  this->debug_buffer[idx].requested_off_us = this->disable_time_us;
-  //  this->debug_buffer[idx].actual_off_us = 0;
-  //  this->dbg_active_idx = idx;
-  //  this->dbg_write_idx = (uint8_t)((idx + 1) & DEBUG_BUF_MASK);
-  //}
+  {
+    uint8_t idx = this->dbg_write_idx;
+    this->debug_buffer[idx].zc_timestamp = this->crossed_zero_at;
+    this->debug_buffer[idx].zc_period_us = this->cycle_time_us;
+    this->debug_buffer[idx].requested_on_us = this->enable_time_us;
+    this->debug_buffer[idx].actual_on_us = 0; //micros();                  // grab the actual on time here with micros so we can see if there is a delay between the zc and the actual on time.
+    this->debug_buffer[idx].requested_off_us = this->disable_time_us;
+    this->debug_buffer[idx].actual_off_us = 0;
+    this->dbg_active_idx = idx;
+    this->dbg_write_idx = (uint8_t)((idx + 1) & DEBUG_BUF_MASK);
+  }
 }
 
 void IRAM_ATTR HOT AcDimmerDataStore::s_gpio_intr(AcDimmerDataStore *store) {
@@ -175,9 +203,34 @@ void IRAM_ATTR HOT AcDimmerDataStore::s_gpio_intr(AcDimmerDataStore *store) {
   }
 }
 
-// wrap timer_interrupt() function to auto-reschedule
-static HWTimer *dimmer_timer = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
-void IRAM_ATTR HOT AcDimmerDataStore::s_timer_intr() { timer_interrupt(); }
+void IRAM_ATTR HOT AcDimmerDataStore::s_timer_intr() {
+  uint32_t now = micros();
+
+  for (auto *dimmer : all_dimmers) {
+    if (dimmer == nullptr) {
+      break;
+    }
+
+    if (dimmer->crossed_zero_at == 0)
+      continue;
+
+    uint8_t aidx = dimmer->dbg_active_idx;
+    uint32_t time_since_zc = now - dimmer->crossed_zero_at;
+    if (dimmer->enable_time_us != 0 && time_since_zc >= dimmer->enable_time_us) {
+      dimmer->debug_buffer[aidx].actual_on_us = time_since_zc;
+      dimmer->enable_time_us = 0;
+      dimmer->gate_pin.digital_write(true);
+    }
+
+    if (dimmer->disable_time_us != 0 && time_since_zc >= dimmer->disable_time_us) {
+      dimmer->debug_buffer[aidx].actual_off_us = time_since_zc;
+      dimmer->disable_time_us = 0;
+      dimmer->gate_pin.digital_write(false);
+    }
+  }
+
+  schedule_next_timer_alarm();
+}
 
 void AcDimmer::setup() {
   // extend all_dimmers array with our dimmer
@@ -217,10 +270,6 @@ void AcDimmer::setup() {
       return;
     }
     timer_attach_interrupt(dimmer_timer, &AcDimmerDataStore::s_timer_intr);
-    // For ESP32, we can't use dynamic interval calculation because the timerX functions
-    // are not callable from ISR (placed in flash storage).
-    // Here we just use an interrupt firing every 50 µs.
-    timer_alarm(dimmer_timer, TIMER_INTERVAL_US, true, 0);
   }
 }
 
@@ -265,7 +314,6 @@ void AcDimmer::loop() {
   this->last_log_time_ = now;
 
   // Drain completed debug records and log CSV lines
-  /*
   while (this->store_.dbg_read_idx != this->store_.dbg_write_idx) {
     uint8_t idx = this->store_.dbg_read_idx;
     // Copy to local to avoid races while logging
@@ -274,7 +322,6 @@ void AcDimmer::loop() {
              ev.requested_on_us, ev.actual_on_us, ev.requested_off_us, ev.actual_off_us);
     this->store_.dbg_read_idx = (uint8_t)((idx + 1) & AcDimmerDataStore::DEBUG_BUF_MASK);
   }
-    */
 }
 
 }  // namespace esphome::ac_dimmer

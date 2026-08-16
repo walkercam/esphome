@@ -102,7 +102,7 @@ bool IRAM_ATTR timer_fn_wrapper(gptimer_handle_t timer, const gptimer_alarm_even
   return false;
 }
 
-static void timer_attach_interrupt_functional_arg(HWTimer *timer, void (*user_func)(void *), void *arg) {
+static void IRAM_ATTR timer_attach_interrupt_functional_arg(HWTimer *timer, void (*user_func)(void *), void *arg) {
   if (timer == nullptr) {
     ESP_LOGE(TAG, "Timer handle is nullptr");
     return;
@@ -128,17 +128,32 @@ static void timer_attach_interrupt_functional_arg(HWTimer *timer, void (*user_fu
   }
 }
 
-void timer_attach_interrupt(HWTimer *timer, voidFuncPtr user_func) {
+void IRAM_ATTR timer_attach_interrupt(HWTimer *timer, voidFuncPtr user_func) {
   timer_attach_interrupt_functional_arg(timer, reinterpret_cast<voidFuncPtrArg>(user_func), nullptr);
 }
 
-void timer_alarm(HWTimer *timer, uint64_t alarm_value, bool autoreload, uint64_t reload_count) {
+void IRAM_ATTR timer_alarm(HWTimer *timer, uint64_t alarm_value, bool autoreload, uint64_t reload_count) {
   if (timer == nullptr) {
     ESP_LOGE(TAG, "Timer handle is nullptr");
     return;
   }
+  // If autoreload is false, treat `alarm_value` as a relative delta in microseconds
+  // from the current gptimer raw count. If autoreload is true, keep the original
+  // semantics where alarm_value is the period (absolute alarm_count value used
+  // as target count relative to reload_count).
+  uint64_t alarm_count = alarm_value;
+  if (!autoreload) {
+    uint64_t cur_count = 0;
+    esp_err_t r = gptimer_get_raw_count(timer->timer_handle, &cur_count);
+    if (r != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to read GPTimer raw count; error %d", r);
+      return;
+    }
+    alarm_count = cur_count + alarm_value;
+  }
+
   gptimer_alarm_config_t alarm_cfg = {
-      .alarm_count = alarm_value,
+      .alarm_count = alarm_count,
       .reload_count = reload_count,
       .flags = {.auto_reload_on_alarm = autoreload},
   };
