@@ -132,10 +132,10 @@ void IRAM_ATTR timer_attach_interrupt(HWTimer *timer, voidFuncPtr user_func) {
   timer_attach_interrupt_functional_arg(timer, reinterpret_cast<voidFuncPtrArg>(user_func), nullptr);
 }
 
-void IRAM_ATTR timer_alarm(HWTimer *timer, uint64_t alarm_value, bool autoreload, uint64_t reload_count) {
+uint32_t IRAM_ATTR timer_alarm(HWTimer *timer, uint64_t alarm_value, bool autoreload, uint64_t reload_count) {
   if (timer == nullptr) {
     ESP_LOGE(TAG, "Timer handle is nullptr");
-    return;
+    return 0;
   }
   // If autoreload is false, treat `alarm_value` as a relative delta in microseconds
   // from the current gptimer raw count. If autoreload is true, keep the original
@@ -147,7 +147,7 @@ void IRAM_ATTR timer_alarm(HWTimer *timer, uint64_t alarm_value, bool autoreload
     esp_err_t r = gptimer_get_raw_count(timer->timer_handle, &cur_count);
     if (r != ESP_OK) {
       ESP_LOGE(TAG, "Failed to read GPTimer raw count; error %d", r);
-      return;
+      return 0;
     }
     alarm_count = cur_count + alarm_value;
   }
@@ -161,6 +161,7 @@ void IRAM_ATTR timer_alarm(HWTimer *timer, uint64_t alarm_value, bool autoreload
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Timer Alarm Write failed; error %d", err);
   }
+  return alarm_count;
 }
 
 }  // namespace esphome::ac_dimmer

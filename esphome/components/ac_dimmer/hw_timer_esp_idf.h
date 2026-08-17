@@ -10,7 +10,7 @@ struct HWTimer;
 HWTimer *timer_begin(uint32_t frequency);
 
 void timer_attach_interrupt(HWTimer *timer, void (*user_func)());
-void timer_alarm(HWTimer *timer, uint64_t alarm_value, bool autoreload, uint64_t reload_count);
+uint32_t timer_alarm(HWTimer *timer, uint64_t alarm_value, bool autoreload, uint64_t reload_count);
 
 }  // namespace esphome::ac_dimmer
 
