@@ -101,15 +101,15 @@ void IRAM_ATTR HOT AcDimmerDataStore::gpio_intr(uint8_t edge) {
         this->enable_time_us = now + 0;
         this->disable_time_us = (this->value * 10000 / 65535) + now + 0;
       } else {
-        this->enable_time_us = now + 70;
-        this->disable_time_us = (this->value * 10000 / 65535) + now + 70;
+        this->enable_time_us = now + 64;
+        this->disable_time_us = (this->value * 10000 / 65535) + now + 64;
       }
       // Calculate time until disable in µs with integer arithmetic and take into account min_power
       //this->disable_time_us = std::max((uint64_t) 10, this->value * (this->cycle_time_us - min_us) / 65535 + min_us) + now;
     } else {
       // Calculate time until enable in µs: (1.0-value)*cycle_time, but with integer arithmetic
       // also take into account min_power
-      this->enable_time_us = ((65535 - this->value) * 10000 / 65535) + now + 70; 
+      this->enable_time_us = ((65535 - this->value) * 10000 / 65535) + now; 
 
       if (this->method == DIM_METHOD_LEADING_PULSE) {
         // Minimum pulse time should be enough for the triac to trigger when it is close to the ZC zone
@@ -119,11 +119,9 @@ void IRAM_ATTR HOT AcDimmerDataStore::gpio_intr(uint8_t edge) {
         if (edge) {
           this->disable_time_us = now + 0;
         } else {
-          this->disable_time_us = now + 70;
-          this->enable_time_us = this->enable_time_us + 70;
-        }
-      
-      
+          this->disable_time_us = now + 64;
+          this->enable_time_us = this->enable_time_us + 64;
+        }      
       }
     }
   }
