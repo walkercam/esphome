@@ -132,10 +132,42 @@ void IRAM_ATTR timer_attach_interrupt(HWTimer *timer, voidFuncPtr user_func) {
   timer_attach_interrupt_functional_arg(timer, reinterpret_cast<voidFuncPtrArg>(user_func), nullptr);
 }
 
-uint32_t IRAM_ATTR timer_alarm(HWTimer *timer, uint64_t alarm_value, bool autoreload, uint64_t reload_count) {
+uint64_t IRAM_ATTR timer_get_raw_count(HWTimer *timer) {
   if (timer == nullptr) {
     ESP_LOGE(TAG, "Timer handle is nullptr");
     return 0;
+  }
+  uint64_t cur_count = 0;
+  esp_err_t r = gptimer_get_raw_count(timer->timer_handle, &cur_count);
+  if (r != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to read GPTimer raw count; error %d", r);
+    return 0;
+  }
+  return cur_count;
+}
+
+void IRAM_ATTR timer_alarm_direct_one_shot(HWTimer *timer, uint64_t alarm_count) {
+  if (timer == nullptr) {
+    ESP_LOGE(TAG, "Timer handle is nullptr");
+    return;
+  }
+
+  gptimer_alarm_config_t alarm_cfg = {
+      .alarm_count = alarm_count,
+      .reload_count = 0,
+      .flags = {.auto_reload_on_alarm = false},
+  };
+
+  esp_err_t err = gptimer_set_alarm_action(timer->timer_handle, &alarm_cfg);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Timer Alarm Write failed; error %d", err);
+  }
+}
+
+void IRAM_ATTR timer_alarm(HWTimer *timer, uint64_t alarm_value, bool autoreload, uint64_t reload_count) {
+  if (timer == nullptr) {
+    ESP_LOGE(TAG, "Timer handle is nullptr");
+    return;
   }
   // If autoreload is false, treat `alarm_value` as a relative delta in microseconds
   // from the current gptimer raw count. If autoreload is true, keep the original
@@ -147,7 +179,7 @@ uint32_t IRAM_ATTR timer_alarm(HWTimer *timer, uint64_t alarm_value, bool autore
     esp_err_t r = gptimer_get_raw_count(timer->timer_handle, &cur_count);
     if (r != ESP_OK) {
       ESP_LOGE(TAG, "Failed to read GPTimer raw count; error %d", r);
-      return 0;
+      return;
     }
     alarm_count = cur_count + alarm_value;
   }
@@ -161,7 +193,6 @@ uint32_t IRAM_ATTR timer_alarm(HWTimer *timer, uint64_t alarm_value, bool autore
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Timer Alarm Write failed; error %d", err);
   }
-  return alarm_count;
 }
 
 }  // namespace esphome::ac_dimmer

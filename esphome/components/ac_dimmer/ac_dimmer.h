@@ -20,13 +20,13 @@ struct AcDimmerDataStore {
   /// Minimum power for activation
   uint16_t min_power;
   /// Time between the last two ZC pulses
-  uint32_t cycle_time_us;
+  uint64_t cycle_time_us;
   /// Time (in micros()) of last ZC signal
-  uint32_t crossed_zero_at;
+  uint64_t crossed_zero_at;
   /// Time since last ZC pulse to enable gate pin. 0 means not set.
-  uint32_t enable_time_us;
+  uint64_t enable_time_us;
   /// Time since last ZC pulse to disable gate pin. 0 means no disable.
-  uint32_t disable_time_us;
+  uint64_t disable_time_us;
   /// Set to send the first half ac cycle complete
   uint8_t init_cycle;
   /// Dimmer method
